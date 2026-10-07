@@ -20,7 +20,9 @@ STATE_HOME=${XDG_STATE_HOME:-$HOME/.local/state}
 STATE_DIR=$STATE_HOME/yautja
 STATE=$STATE_DIR/state.json
 KILL_LOG=$STATE_DIR/kills.jsonl
-RUN_DIR=${XDG_RUNTIME_DIR:-/tmp}/yautja
+# Lock and countdown state is trusted to name a window or a pid, so it never
+# falls back to a shared directory like /tmp.
+RUN_DIR=${XDG_RUNTIME_DIR:-$STATE_DIR}/yautja
 SHADER_DIR=$ROOT/shaders
 VISION_TOGGLE=$STATE_HOME/omarchy/toggles/hypr/yautja-vision.lua
 SOUND_FILE=$ROOT/sounds/clicks.ogg

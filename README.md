@@ -8,6 +8,8 @@ but works under any theme.
 
 Fan-made and unaffiliated with any film or game franchise.
 
+![Yautja mode in thermal vision](preview.png)
+
 ## What you get
 
 | Key | Does |
@@ -33,7 +35,14 @@ Fan-made and unaffiliated with any film or game franchise.
 
 ## Install
 
-Requires Omarchy 4 (Lua Hyprland config and the Quickshell bar).
+Requires Omarchy 4 (Lua Hyprland config and the Quickshell bar). Everything
+else it uses already ships with Omarchy:
+
+- `jq`, `pgrep` and `ps` for state and process lookups
+- `hyprctl` for shaders, window tags and reloads
+- `pw-play` (PipeWire) for the click sound; without it the plugin is silent
+
+No sudo, no network access, no packages installed.
 
 ```bash
 omarchy plugin add https://github.com/neilofneils404/omarchy-yautja.git --yes
