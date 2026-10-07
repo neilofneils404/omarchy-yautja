@@ -27,8 +27,11 @@ Fan-made and unaffiliated with any film or game franchise.
 - **Trophy wall** is a bar widget: one skull per kill of 1 GB or more since
   boot. Left click cycles vision, middle click turns it off, right click lists
   the kills.
-- **Yautja menu** adds all of the above to the Omarchy menu, plus Self-destruct:
-  a 10 second countdown, then a real shutdown. Picking it again aborts.
+- **Yautja menu** provides vision, cloak and trophy controls, plus Self-destruct:
+  a 10 second countdown, then a real shutdown. Click the countdown notification,
+  pick Self-destruct again, or choose **Abort self-destruct** to cancel it.
+  **Stand down** cancels the countdown,
+  releases the target, decloaks all windows, and turns vision off.
 - **Thermal look**: while the Yautja theme is active, the focused window gets a
   heat glow and the rest dim and cool. Themes installed from git cannot carry
   Hyprland Lua, so this lives here.
@@ -39,6 +42,8 @@ Requires Omarchy 4 (Lua Hyprland config and the Quickshell bar). Everything
 else it uses already ships with Omarchy:
 
 - `jq`, `pgrep` and `ps` for state and process lookups
+- `flock` (util-linux) to serialize commands and protect shared state
+- Python 3 for comment-preserving installation and removal of config entries
 - `hyprctl` for shaders, window tags and reloads
 - `pw-play` (PipeWire) for the click sound; without it the plugin is silent
 
@@ -49,10 +54,13 @@ omarchy plugin add https://github.com/neilofneils404/omarchy-yautja.git --yes
 ~/.config/omarchy/plugins/neil.yautja/install.sh
 ```
 
-`install.sh` links `yautja` into `~/.local/bin`, appends two lines to
+`install.sh` links `yautja` into `~/.local/bin`, adds a managed loader to
 `~/.config/hypr/hyprland.lua`, adds the menu block to
 `~/.config/omarchy/extensions/omarchy-menu.jsonc`, and places the widget after
-the workspaces. It backs up both files first and is safe to run again.
+the workspaces. It backs up changed config files first and is safe to run
+again. Re-running it updates the menu and keeps your existing widget placement.
+It preserves JSONC comments and configuration symlinks, and refuses to overwrite
+an unrelated `yautja` command.
 
 To work from your own checkout, clone it anywhere and run `./install.sh`; it
 symlinks the checkout into the plugin directory.
@@ -65,10 +73,19 @@ yautja cloak [all-off]
 yautja hunt [--no-honour]
 yautja trophies [notify|clear|json]
 yautja self-destruct [abort]
+yautja reset
+yautja --help
 ```
 
 - `SOUND=0` in `~/.config/yautja/config` silences the clicks.
 - `YAUTJA_DRY_RUN=1 yautja self-destruct` runs the countdown without shutting down.
+- `yautja reset` is the command-line equivalent of **Stand down**.
+- State and kill history live in `${XDG_STATE_HOME:-~/.local/state}/yautja`.
+  The widget follows the same location. On a vertical bar it shows only the
+  mode icon; hover for recent kills and click hints.
+
+After updating this checkout or the installed plugin, run `./install.sh` again
+to refresh the menu entries.
 
 ## Uninstall
 
@@ -86,7 +103,22 @@ shaders/                       thermal, em and tracking screen shaders
 hypr/yautja.lua                keybinds, cloak and lock rules, thermal look
 menu/omarchy-menu.jsonc        the Yautja submenu
 sounds/clicks.ogg              synthesized click sound
+scripts/manage-config.py      preserves user config while managing plugin blocks
+tests/                        isolated runtime and installation regression tests
 ```
+
+## Checks
+
+```bash
+python3 -m unittest discover -s tests -v
+for script in bin/yautja install.sh uninstall.sh; do bash -n "$script"; done
+luac -p hypr/yautja.lua
+for shader in shaders/*.frag; do glslangValidator -S frag "$shader"; done
+```
+
+The regression tests use temporary homes and mock desktop commands. They never
+kill applications or shut down the machine. `glslangValidator` is an optional
+development tool, not a runtime dependency.
 
 ## Licence
 

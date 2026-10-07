@@ -7,66 +7,127 @@
 #   yautja hunt [--no-honour]
 #   yautja trophies [notify|clear|json]
 #   yautja self-destruct [abort]
+#   yautja reset
 #
 # Set SOUND=0 in ~/.config/yautja/config to hunt silently.
 # Set YAUTJA_DRY_RUN=1 to run self-destruct without shutting down.
 
-set -uo pipefail
+set -euo pipefail
+umask 077
 
-# The plugin checkout this script lives in, even when run through a symlink.
+usage() {
+  sed -n '3,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+# Validate before creating state or touching the desktop. A typo must never
+# become an instruction to kill a window or start a shutdown countdown.
+case ${1:-help} in
+  help|-h|--help) usage; exit 0 ;;
+  vision) [[ $# -le 2 && ${2:-next} =~ ^(next|off|thermal|em|tracking|status)$ ]] ;;
+  cloak) [[ $# -le 2 && ${2:-toggle} =~ ^(toggle|all-off)$ ]] ;;
+  hunt) [[ $# -le 2 && ( $# == 1 || ${2:-} == --no-honour ) ]] ;;
+  trophies) [[ $# -le 2 && ${2:-list} =~ ^(list|notify|clear|json)$ ]] ;;
+  self-destruct) [[ $# -le 2 && ( $# == 1 || ${2:-} == abort ) ]] ;;
+  reset) [[ $# == 1 ]] ;;
+  *) false ;;
+esac || { usage >&2; exit 2; }
+
 ROOT=$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")
-
 STATE_HOME=${XDG_STATE_HOME:-$HOME/.local/state}
 STATE_DIR=$STATE_HOME/yautja
 STATE=$STATE_DIR/state.json
 KILL_LOG=$STATE_DIR/kills.jsonl
-# Lock and countdown state is trusted to name a window or a pid, so it never
-# falls back to a shared directory like /tmp.
 RUN_DIR=${XDG_RUNTIME_DIR:-$STATE_DIR}/yautja
 SHADER_DIR=$ROOT/shaders
 VISION_TOGGLE=$STATE_HOME/omarchy/toggles/hypr/yautja-vision.lua
 SOUND_FILE=$ROOT/sounds/clicks.ogg
-CONFIG=$HOME/.config/yautja/config
+CONFIG=${XDG_CONFIG_HOME:-$HOME/.config}/yautja/config
 
 VISION_MODES=(off thermal em tracking)
 CLOAK_TAG=yautja-cloak
 LOCK_TAG=yautja-lock
 LOCK_SECONDS=6
-UNARMED_KB=$((100 * 1024))   # below this the prey is spared
-WORTHY_KB=$((1024 * 1024))   # at or above this the kill earns a skull
+UNARMED_KB=$((100 * 1024))
+WORTHY_KB=$((1024 * 1024))
 
 SOUND=1
-[[ -f $CONFIG ]] && source "$CONFIG"
+[[ ! -f $CONFIG ]] || source "$CONFIG"
 
-mkdir -p "$STATE_DIR" "$RUN_DIR"
+# These private directories contain process/window identifiers. Refuse a
+# symlink or somebody else's directory instead of trusting its contents.
+for directory in "$STATE_DIR" "$RUN_DIR"; do
+  [[ ! -L $directory ]] || { echo "Refusing symlink: $directory" >&2; exit 1; }
+  mkdir -p -- "$directory"
+  [[ -O $directory && -d $directory ]] || { echo "Not an owned directory: $directory" >&2; exit 1; }
+  chmod 700 -- "$directory"
+done
+
+# Serialize complete read/modify/write operations, including the compositor
+# change. Background timers close this descriptor and reacquire independently.
+exec 9>"$RUN_DIR/command.lock"
+flock -w 5 9 || { echo "Yautja is busy; try again." >&2; exit 1; }
 
 notify() {
-  local glyph=$1 headline=$2 description=${3:-}
-  omarchy-notification-send -g "$glyph" -t 3500 "$headline" "$description" >/dev/null 2>&1 || true
+  omarchy-notification-send -g "$1" -t 3500 "$2" "${3:-}" >/dev/null 2>&1 || true
 }
 
 clicks() {
   [[ $SOUND == 1 && -f $SOUND_FILE ]] || return 0
-  (pw-play --volume 0.3 "$SOUND_FILE" >/dev/null 2>&1 &)
+  (exec 9>&-; pw-play --volume 0.3 "$SOUND_FILE" >/dev/null 2>&1) &
 }
 
-boot_id() {
-  cat /proc/sys/kernel/random/boot_id 2>/dev/null
-}
+boot_id() { cat /proc/sys/kernel/random/boot_id; }
+new_token() { cat /proc/sys/kernel/random/uuid; }
 
 read_state() {
-  if [[ -s $STATE ]] && jq -e . "$STATE" >/dev/null 2>&1; then
-    cat "$STATE"
+  local content
+  if content=$(cat "$STATE" 2>/dev/null) && jq -e '
+    type == "object" and (.trophies | type == "array")
+    and (.vision | IN("off", "thermal", "em", "tracking"))' <<<"$content" >/dev/null 2>&1; then
+    printf '%s\n' "$content"
   else
     echo '{"vision":"off","trophies":[]}'
   fi
 }
 
-# Written in place, not renamed, so the bar widget's file watch keeps firing.
+# Atomic replacement prevents readers (including the bar) seeing partial JSON.
 write_state() {
-  local content
-  content=$(cat)
-  printf '%s\n' "$content" >"$STATE"
+  local temporary
+  temporary=$(mktemp "$STATE_DIR/.state.XXXXXX") || return
+  if ! cat >"$temporary" || ! jq -e 'type == "object"' "$temporary" >/dev/null; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  mv -f -- "$temporary" "$STATE"
+}
+
+lua_string() {
+  local value=$1
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//$'\n'/\\n}
+  value=${value//$'\r'/\\r}
+  value=${value//$'\t'/\\t}
+  printf '"%s"' "$value"
+}
+
+# hyprctl can exit successfully while reporting a Lua error in its response.
+hypr_action() {
+  local reply
+  if ! reply=$(hyprctl "$@" 2>&1); then
+    printf 'Hyprland command failed: %s\n' "$reply" >&2
+    return 1
+  fi
+  if [[ ${reply//$'\n'/} != ok ]]; then
+    printf 'Hyprland rejected the command: %s\n' "$reply" >&2
+    return 1
+  fi
+}
+
+window_tag() {
+  local address=$1 tag=$2
+  [[ $address =~ ^0x[[:xdigit:]]+$ ]] || return 1
+  hypr_action dispatch "hl.dsp.window.tag({ tag = $(lua_string "$tag"), window = 'address:$address' })"
 }
 
 human_kb() {
@@ -76,7 +137,7 @@ human_kb() {
 tree_pids() {
   local pid=$1 child
   echo "$pid"
-  for child in $(pgrep -P "$pid" 2>/dev/null); do
+  for child in $(pgrep -P "$pid" 2>/dev/null || true); do
     tree_pids "$child"
   done
 }
@@ -87,189 +148,163 @@ tree_rss_kb() {
   ps -o rss= -p "$pids" 2>/dev/null | awk '{ sum += $1 } END { print sum + 0 }'
 }
 
-window_dispatch() {
-  hyprctl dispatch "$1" >/dev/null 2>&1
+process_start() {
+  local stat
+  local -a fields
+  IFS= read -r stat <"/proc/$1/stat" 2>/dev/null || return 1
+  # Field 2 (comm) can contain spaces or parentheses; strip through its final ).
+  read -ra fields <<<"${stat##*) }"
+  [[ ${fields[19]:-} =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "${fields[19]}"
 }
 
-# --- Vision ------------------------------------------------------------------
-
-vision_current() {
-  read_state | jq -r '.vision // "off"'
-}
+vision_current() { read_state | jq -r '.vision'; }
 
 vision_set() {
-  local mode=$1 shader=""
-
+  local mode=$1 shader="" lua temporary
   if [[ $mode != off ]]; then
     shader=$SHADER_DIR/$mode.frag
-    if [[ ! -f $shader ]]; then
-      echo "Unknown vision mode: $mode" >&2
-      exit 1
-    fi
+    [[ -f $shader ]] || { echo "Missing shader: $shader" >&2; return 1; }
   fi
+  lua="hl.config({ decoration = { screen_shader = $(lua_string "$shader") } })"
+  hypr_action eval "$lua" || return
 
-  hyprctl eval "hl.config({ decoration = { screen_shader = '$shader' } })" >/dev/null
-
-  # The toggle file re-applies the mode when Hyprland reloads its config.
   if [[ $mode == off ]]; then
-    rm -f "$VISION_TOGGLE"
+    rm -f -- "$VISION_TOGGLE"
   else
-    mkdir -p "$(dirname "$VISION_TOGGLE")"
-    printf 'hl.config({ decoration = { screen_shader = "%s" } })\n' "$shader" >"$VISION_TOGGLE"
+    mkdir -p -- "$(dirname "$VISION_TOGGLE")"
+    temporary=$(mktemp "$(dirname "$VISION_TOGGLE")/.yautja-vision.XXXXXX") || return
+    printf '%s\n' "$lua" >"$temporary"
+    mv -f -- "$temporary" "$VISION_TOGGLE"
   fi
-
-  read_state | jq --arg mode "$mode" '.vision = $mode' | write_state
+  read_state | jq --arg mode "$mode" '.vision = $mode' | write_state || return
   clicks
 }
 
 vision() {
-  local action=${1:-next} current index i
-
+  local action=${1:-next} current index=0 i
   case $action in
-    status)
-      vision_current
-      ;;
+    status) vision_current ;;
     next)
       current=$(vision_current)
-      index=0
       for i in "${!VISION_MODES[@]}"; do
-        [[ ${VISION_MODES[$i]} == "$current" ]] && index=$i
+        [[ ${VISION_MODES[$i]} != "$current" ]] || index=$i
       done
       vision_set "${VISION_MODES[$(((index + 1) % ${#VISION_MODES[@]}))]}"
       ;;
-    *)
-      vision_set "$action"
-      ;;
+    *) vision_set "$action" ;;
   esac
 }
 
-# --- Cloak -------------------------------------------------------------------
+clear_tag() {
+  local tag=$1 windows address result=0
+  windows=$(hyprctl clients -j) || return
+  windows=$(jq -r --arg tag "$tag" '.[] | select((.tags // []) | index($tag)) | .address' <<<"$windows") || return
+  while IFS= read -r address; do
+    [[ -z $address ]] || window_tag "$address" "-$tag" || result=1
+  done <<<"$windows"
+  return "$result"
+}
 
 cloak() {
   local window address cloaked
-
-  if [[ ${1:-} == all-off ]]; then
-    hyprctl clients -j | jq -r --arg tag "$CLOAK_TAG" '.[] | select(.tags | index($tag)) | .address' |
-      while read -r address; do
-        window_dispatch "hl.dsp.window.tag({ tag = '-$CLOAK_TAG', window = 'address:$address' })"
-      done
-    return
-  fi
-
-  window=$(hyprctl activewindow -j)
-  address=$(jq -r '.address // empty' <<<"$window")
-  [[ -n $address ]] || exit 0
-
-  cloaked=$(jq -r --arg tag "$CLOAK_TAG" '.tags | index($tag) != null' <<<"$window")
+  if [[ ${1:-} == all-off ]]; then clear_tag "$CLOAK_TAG"; return; fi
+  window=$(hyprctl activewindow -j) || return
+  address=$(jq -r '.address // empty' <<<"$window") || return
+  [[ -n $address ]] || return 0
+  cloaked=$(jq -r --arg tag "$CLOAK_TAG" '(.tags // []) | index($tag) != null' <<<"$window") || return
   if [[ $cloaked == true ]]; then
-    window_dispatch "hl.dsp.window.tag({ tag = '-$CLOAK_TAG', window = 'address:$address' })"
+    window_tag "$address" "-$CLOAK_TAG" || return
   else
-    window_dispatch "hl.dsp.window.tag({ tag = '+$CLOAK_TAG', window = 'address:$address' })"
+    window_tag "$address" "+$CLOAK_TAG" || return
   fi
   clicks
 }
 
-# --- Hunt --------------------------------------------------------------------
-
 release_lock() {
   local address=$1
-  window_dispatch "hl.dsp.window.tag({ tag = '-$LOCK_TAG', window = 'address:$address' })"
-  rm -f "$RUN_DIR/lock"
+  rm -f -- "$RUN_DIR/lock"
+  window_tag "$address" "-$LOCK_TAG"
 }
 
 record_kill() {
   local class=$1 title=$2 pid=$3 rss=$4 worthy=$5 entry
-
   entry=$(jq -cn --arg class "$class" --arg title "$title" --arg boot "$(boot_id)" \
     --argjson pid "$pid" --argjson rss "$rss" --argjson worthy "$worthy" --argjson at "$(date +%s)" \
-    '{class: $class, title: $title, pid: $pid, rss_kb: $rss, worthy: $worthy, boot: $boot, at: $at}')
-
-  echo "$entry" >>"$KILL_LOG"
+    '{class: $class, title: $title, pid: $pid, rss_kb: $rss, worthy: $worthy, boot: $boot, at: $at}') || return
+  printf '%s\n' "$entry" >>"$KILL_LOG"
   read_state | jq --argjson entry "$entry" --arg boot "$(boot_id)" \
     '.trophies = ([.trophies[]? | select(.boot == $boot)] + [$entry])' | write_state
 }
 
 hunt() {
-  local honour=1 window address pid class title rss mass locked_address locked_at now
-
-  [[ ${1:-} == --no-honour ]] && honour=0
-
-  window=$(hyprctl activewindow -j)
-  address=$(jq -r '.address // empty' <<<"$window")
-  if [[ -z $address ]]; then
-    notify "󰓾" "No prey in sight"
-    exit 0
-  fi
-
-  pid=$(jq -r '.pid' <<<"$window")
-  class=$(jq -r '.class' <<<"$window")
-  title=$(jq -r '.title' <<<"$window")
-
-  if (( pid <= 1 )) || [[ $class == org.quickshell ]]; then
+  local honour=1 window address pid class title rss mass started now token
+  local locked_address="" locked_pid="" locked_start="" locked_at=0 locked_token=""
+  [[ ${1:-} != --no-honour ]] || honour=0
+  window=$(hyprctl activewindow -j) || return
+  address=$(jq -r '.address // empty' <<<"$window") || return
+  if [[ -z $address ]]; then notify "󰓾" "No prey in sight"; return 0; fi
+  pid=$(jq -r '.pid' <<<"$window") || return
+  class=$(jq -r '.class // "Unknown"' <<<"$window") || return
+  title=$(jq -r '.title // ""' <<<"$window") || return
+  if [[ ! $pid =~ ^[0-9]+$ ]] || (( pid <= 1 )) || [[ $class == org.quickshell ]]; then
     notify "󰓾" "Not prey" "$class cannot be hunted"
-    exit 0
+    return 0
   fi
-
-  rss=$(tree_rss_kb "$pid")
+  started=$(process_start "$pid") || { notify "󰓾" "The prey escaped"; return 1; }
+  rss=$(tree_rss_kb "$pid") || return
   mass=$(human_kb "$rss")
   now=$(date +%s)
+  if [[ -f $RUN_DIR/lock ]]; then
+    read -r locked_address locked_pid locked_start locked_at locked_token <"$RUN_DIR/lock" || true
+  fi
+  [[ $locked_at =~ ^[0-9]+$ ]] || locked_at=0
 
-  locked_address=""
-  locked_at=0
-  [[ -f $RUN_DIR/lock ]] && read -r locked_address locked_at <"$RUN_DIR/lock"
-
-  # First press locks on. A second press on the same window within the lock
-  # window fires.
-  if [[ $locked_address != "$address" ]] || (( now - locked_at > LOCK_SECONDS )); then
-    [[ -n $locked_address ]] && release_lock "$locked_address"
-    echo "$address $now" >"$RUN_DIR/lock"
-    window_dispatch "hl.dsp.window.tag({ tag = '+$LOCK_TAG', window = 'address:$address' })"
+  # A second press must identify the same window AND process instance.
+  if [[ $locked_address != "$address" || $locked_pid != "$pid" || $locked_start != "$started" ]] \
+      || (( now - locked_at >= LOCK_SECONDS || now < locked_at )); then
+    [[ -z $locked_address ]] || release_lock "$locked_address" || true
+    token=$(new_token)
+    window_tag "$address" "+$LOCK_TAG" || return
+    printf '%s %s %s %s %s\n' "$address" "$pid" "$started" "$now" "$token" >"$RUN_DIR/lock"
     notify "󰓾" "Target locked: $class" "$mass. Fire again within ${LOCK_SECONDS}s to take it."
     clicks
     (
+      exec 9>&-
       sleep "$LOCK_SECONDS"
-      if [[ -f $RUN_DIR/lock ]] && [[ $(cut -d' ' -f1 "$RUN_DIR/lock") == "$address" ]]; then
+      exec 9>"$RUN_DIR/command.lock"
+      flock -w 5 9 || exit 1
+      if [[ -f $RUN_DIR/lock ]] && [[ $(awk '{print $5}' "$RUN_DIR/lock") == "$token" ]]; then
         release_lock "$address"
       fi
     ) >/dev/null 2>&1 &
-    disown
-    exit 0
+    return 0
   fi
 
-  release_lock "$address"
-
+  release_lock "$address" || return
   if (( honour == 1 && rss < UNARMED_KB )); then
     notify "󰒲" "No sport" "$class is unarmed ($mass). Spared."
-    exit 0
+    return 0
   fi
-
-  if ! kill -KILL "$pid" 2>/dev/null; then
+  if [[ $(process_start "$pid") != "$started" ]] || ! kill -KILL "$pid" 2>/dev/null; then
     notify "󰓾" "The prey escaped" "Could not kill $class (pid $pid)"
-    exit 1
+    return 1
   fi
-
   if (( rss >= WORTHY_KB )); then
-    record_kill "$class" "$title" "$pid" "$rss" true
+    record_kill "$class" "$title" "$pid" "$rss" true || return
     notify "󰚌" "Trophy taken: $class" "$mass"
   else
-    record_kill "$class" "$title" "$pid" "$rss" false
+    record_kill "$class" "$title" "$pid" "$rss" false || return
     notify "󰓾" "Kill: $class" "$mass. Too small for the wall."
   fi
 }
 
-# --- Trophies ----------------------------------------------------------------
-
 trophies() {
   local boot lines
   boot=$(boot_id)
-
   case ${1:-list} in
-    json)
-      read_state | jq --arg boot "$boot" '[.trophies[]? | select(.boot == $boot)]'
-      ;;
-    clear)
-      read_state | jq '.trophies = []' | write_state
-      ;;
+    json) read_state | jq --arg boot "$boot" '[.trophies[]? | select(.boot == $boot)]' ;;
+    clear) read_state | jq '.trophies = []' | write_state ;;
     notify)
       lines=$(read_state | jq -r --arg boot "$boot" '
         [.trophies[]? | select(.boot == $boot)]
@@ -277,10 +312,10 @@ trophies() {
           else map((if .worthy then "󰚌 " else "· " end) + .class + "  "
             + (if .rss_kb >= 1048576 then ((.rss_kb / 104857.6 | round) / 10 | tostring) + " GB"
                else ((.rss_kb / 1024 | floor) | tostring) + " MB" end)) | join("\n")
-          end')
+          end') || return
       omarchy-notification-send -g "󰚌" -t 8000 "Trophy wall" "$lines" >/dev/null 2>&1 || true
       ;;
-    *)
+    list)
       read_state | jq -r --arg boot "$boot" '
         .trophies[]? | select(.boot == $boot)
         | [(.at | strflocaltime("%H:%M:%S")), .class, ((.rss_kb / 1024 | floor | tostring) + " MB"), (if .worthy then "trophy" else "kill" end)]
@@ -289,51 +324,79 @@ trophies() {
   esac
 }
 
-# --- Self-destruct -----------------------------------------------------------
+countdown_notice() {
+  local seconds=$1 id=$2 next_id
+  local glyphs=("╬╬" "╠╣" "╦╩" "╬┤" "├╬" "╩╣" "╠╦" "┤╩" "╦├" "╣╬")
+  next_id=$(omarchy-notification-send -g "󰚑" -u critical -t 1500 -r "$id" -p \
+    "${glyphs[$((seconds - 1))]} ${glyphs[$(((seconds * 3) % 10))]} ${glyphs[$(((seconds * 7) % 10))]}" \
+    "Self-destruct in $seconds. Click to abort, or run it again." \
+    --exec "$ROOT/bin/yautja" self-destruct abort 2>/dev/null) || return
+  [[ $next_id =~ ^[0-9]+$ && $next_id != 0 ]] || return 1
+  printf '%s\n' "$next_id"
+}
 
 self_destruct() {
-  local pidfile=$RUN_DIR/destruct.pid idfile=$RUN_DIR/destruct.id
-  local glyphs=("╬╬" "╠╣" "╦╩" "╬┤" "├╬" "╩╣" "╠╦" "┤╩" "╦├" "╣╬")
-
-  if [[ -f $pidfile ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
-    kill "$(cat "$pidfile")" 2>/dev/null
-    rm -f "$pidfile"
-    omarchy-notification-send -g "󰚑" -t 4000 -r "$(cat "$idfile" 2>/dev/null || echo 0)" \
-      "Self-destruct aborted" >/dev/null 2>&1 || true
-    exit 0
+  local token id=0
+  if [[ -f $RUN_DIR/destruct.token ]]; then
+    rm -f -- "$RUN_DIR/destruct.token"
+    [[ ! -f $RUN_DIR/destruct.id ]] || read -r id <"$RUN_DIR/destruct.id" || true
+    [[ $id =~ ^[0-9]+$ ]] || id=0
+    rm -f -- "$RUN_DIR/destruct.id"
+    omarchy-notification-send -g "󰚑" -t 4000 -r "$id" "Self-destruct aborted" >/dev/null 2>&1 || true
+    return 0
   fi
-
-  [[ ${1:-} == abort ]] && exit 0
-
+  [[ ${1:-} != abort ]] || return 0
+  # If the user cannot see the countdown, it must not start.
+  id=$(countdown_notice 10 0) || { echo "Cannot show the countdown; shutdown cancelled." >&2; return 1; }
+  token=$(new_token)
+  printf '%s\n' "$token" >"$RUN_DIR/destruct.token"
+  printf '%s\n' "$id" >"$RUN_DIR/destruct.id"
   (
-    id=0
-    for ((i = 10; i >= 1; i--)); do
-      id=$(omarchy-notification-send -g "󰚑" -u critical -t 1500 -r "$id" -p \
-        "${glyphs[$((i - 1))]} ${glyphs[$(((i * 3) % 10))]} ${glyphs[$(((i * 7) % 10))]}" \
-        "Self-destruct in $i. Run it again to abort." 2>/dev/null || echo 0)
-      echo "$id" >"$idfile"
+    exec 9>&-
+    for ((i = 9; i >= 0; i--)); do
       sleep 1
+      exec 9>"$RUN_DIR/command.lock"
+      flock -w 5 9 || exit 1
+      [[ -f $RUN_DIR/destruct.token && $(cat "$RUN_DIR/destruct.token") == "$token" ]] || exit 0
+      if (( i > 0 )); then
+        if ! id=$(countdown_notice "$i" "$id"); then
+          rm -f -- "$RUN_DIR/destruct.token" "$RUN_DIR/destruct.id"
+          exit 1
+        fi
+        printf '%s\n' "$id" >"$RUN_DIR/destruct.id"
+      else
+        rm -f -- "$RUN_DIR/destruct.token" "$RUN_DIR/destruct.id"
+        if [[ ${YAUTJA_DRY_RUN:-0} == 1 ]]; then
+          omarchy-notification-send -g "󰚑" -t 4000 -r "$id" "Boom" "Dry run, nothing was shut down." >/dev/null 2>&1
+        else
+          omarchy system shutdown
+        fi
+      fi
+      exec 9>&-
     done
-    rm -f "$pidfile"
-    if [[ -n ${YAUTJA_DRY_RUN:-} ]]; then
-      omarchy-notification-send -g "󰚑" -t 4000 -r "$id" "Boom" "Dry run, nothing was shut down." >/dev/null 2>&1
-    else
-      omarchy system shutdown
-    fi
   ) >/dev/null 2>&1 &
-  echo $! >"$pidfile"
-  disown
   clicks
 }
 
-case ${1:-} in
-  vision) shift; vision "$@" ;;
-  cloak) shift; cloak "$@" ;;
-  hunt) shift; hunt "$@" ;;
-  trophies) shift; trophies "$@" ;;
-  self-destruct) shift; self_destruct "$@" ;;
-  *)
-    sed -n '3,12p' "$0" | sed 's/^# \{0,1\}//'
-    exit 1
-    ;;
+reset() {
+  local result=0
+  self_destruct abort || result=1
+  rm -f -- "$RUN_DIR/lock" "$RUN_DIR/destruct.pid" "$RUN_DIR/destruct.id"
+  clear_tag "$LOCK_TAG" || result=1
+  clear_tag "$CLOAK_TAG" || result=1
+  vision_set off || result=1
+  # Even without a running compositor, uninstall must remove persistent vision.
+  rm -f -- "$VISION_TOGGLE"
+  return "$result"
+}
+
+command=$1
+shift
+case $command in
+  vision) vision "$@" ;;
+  cloak) cloak "$@" ;;
+  hunt) hunt "$@" ;;
+  trophies) trophies "$@" ;;
+  self-destruct) self_destruct "$@" ;;
+  reset) reset ;;
 esac

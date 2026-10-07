@@ -8,4 +8,6 @@
   "yautja.decloak": {"icon":"󰊠","label":"Decloak all","action":"~/.local/bin/yautja cloak all-off"},
   "yautja.trophies": {"icon":"󰚌","label":"Trophy wall","action":"~/.local/bin/yautja trophies notify"},
   "yautja.self-destruct": {"icon":"󰚑","label":"Self-destruct","action":"~/.local/bin/yautja self-destruct","description":"Shuts down after a 10 second countdown. Pick it again to abort."},
+  "yautja.self-destruct-abort": {"icon":"󰜺","label":"Abort self-destruct","action":"~/.local/bin/yautja self-destruct abort","description":"Cancel the countdown"},
+  "yautja.reset": {"icon":"󰒲","label":"Stand down","action":"~/.local/bin/yautja reset","description":"Vision off, decloak all, release target and cancel countdown"},
   // <<< neil.yautja

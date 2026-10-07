@@ -4,10 +4,26 @@ set -euo pipefail
 project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 plugin_id="neil.yautja"
 plugin_dir="$HOME/.config/omarchy/plugins/$plugin_id"
-shell_config="$HOME/.config/omarchy/shell.json"
 hypr_config="$HOME/.config/hypr/hyprland.lua"
 menu_config="$HOME/.config/omarchy/extensions/omarchy-menu.jsonc"
 bin_link="$HOME/.local/bin/yautja"
+config_helper="$project_dir/scripts/manage-config.py"
+
+for dependency in python3 omarchy omarchy-shell hyprctl jq flock; do
+  command -v "$dependency" >/dev/null || {
+    echo "Yautja requires $dependency. Install it before running install.sh." >&2
+    exit 1
+  }
+done
+
+# Refuse conflicts before modifying the user's configuration or creating links.
+if [[ -e $bin_link || -L $bin_link ]]; then
+  if [[ ! -L $bin_link || $(readlink -f "$bin_link") != "$(readlink -f "$project_dir/bin/yautja")" ]]; then
+    echo "An unrelated command exists at $bin_link. Move it before installing Yautja." >&2
+    exit 1
+  fi
+fi
+python3 "$config_helper" check "$hypr_config" "$menu_config" "$project_dir/menu/omarchy-menu.jsonc"
 
 # `omarchy plugin add` clones the repo straight into the plugin directory. Run
 # from any other checkout, link that checkout in instead.
@@ -24,48 +40,42 @@ fi
 mkdir -p "$(dirname "$bin_link")"
 ln -sfn "$plugin_dir/bin/yautja" "$bin_link"
 
-# Hyprland: keybinds, cloak and lock rules, thermal look. loadfile keeps the
-# config valid if the plugin is later removed without running uninstall.sh.
-if [[ -f $hypr_config ]] && ! grep -q "$plugin_id" "$hypr_config"; then
-  cp "$hypr_config" "$hypr_config.bak.$(date +%s)"
-  cat >>"$hypr_config" <<'LUA'
-
--- Yautja mode (neil.yautja). Remove with the plugin's uninstall.sh.
-local yautja_mode = loadfile(os.getenv("HOME") .. "/.config/omarchy/plugins/neil.yautja/hypr/yautja.lua") -- neil.yautja
-if yautja_mode then yautja_mode() end -- neil.yautja
-LUA
-fi
-
-# Omarchy menu: a Yautja submenu, inserted before the closing brace.
-if [[ -f $menu_config ]] && ! grep -q ">>> $plugin_id" "$menu_config"; then
-  cp "$menu_config" "$menu_config.bak.$(date +%s)"
-  last_brace=$(grep -n '^}' "$menu_config" | tail -n1 | cut -d: -f1)
-  if [[ -n $last_brace ]]; then
-    {
-      head -n $((last_brace - 1)) "$menu_config"
-      cat "$project_dir/menu/omarchy-menu.jsonc"
-      tail -n +"$last_brace" "$menu_config"
-    } >"$menu_config.tmp"
-    mv "$menu_config.tmp" "$menu_config"
-  else
-    echo "Could not find the closing brace in $menu_config; skipped the menu entries." >&2
-  fi
-fi
+# Back up and update only the managed blocks, preserving JSONC comments and
+# other customizations. The menu is also created for a fresh Omarchy profile.
+python3 "$config_helper" install "$hypr_config" "$menu_config" "$project_dir/menu/omarchy-menu.jsonc"
 
 omarchy-shell -q shell rescanPlugins
-# The shell owns shell.json: let it place the widget, and leave an existing
-# placement alone.
-if [[ -f $shell_config ]] && jq -e --arg id "$plugin_id" 'any(.bar.layout[]?[]?; .id? == $id)' "$shell_config" >/dev/null; then
-  echo "$plugin_id is already in your bar; left its placement alone."
-else
-  omarchy plugin enable "$plugin_id" --after omarchy.workspaces
+# Discovery is asynchronous, just as it is for `omarchy plugin add`.
+discovered=0
+for ((attempt = 0; attempt < 40; attempt++)); do
+  if omarchy plugin list --json | jq -e --arg id "$plugin_id" 'any(.[]; .id == $id)' >/dev/null; then
+    discovered=1
+    break
+  fi
+  sleep 0.05
+done
+if (( ! discovered )); then
+  echo "The Omarchy shell has not discovered $plugin_id. Check that the shell is running, then run install.sh again." >&2
+  exit 1
 fi
+# The shell keeps an existing placement, re-enables disabled widgets, and puts
+# new left-section widgets after workspaces (or at the end if it is absent).
+omarchy plugin enable "$plugin_id"
 
-hyprctl reload >/dev/null 2>&1 || true
-errors=$(hyprctl configerrors 2>/dev/null || true)
+config_failure() {
+  printf '%s\n' "$1" >&2
+  echo "Yautja files remain installed. Edited configs have backups alongside them; fix the reported error and rerun install.sh." >&2
+  exit 1
+}
+
+if ! reload_result=$(hyprctl reload 2>&1); then
+  config_failure "Hyprland reload failed: $reload_result"
+fi
+if ! errors=$(hyprctl configerrors 2>&1); then
+  config_failure "Could not check Hyprland config errors: $errors"
+fi
 if [[ -n $errors ]]; then
-  echo "Hyprland reported config errors after install:" >&2
-  echo "$errors" >&2
+  config_failure "Hyprland reported config errors after install: $errors"
 fi
 
 cat <<'DONE'
