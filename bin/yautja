@@ -166,7 +166,25 @@ vision_set() {
     shader=$SHADER_DIR/$mode.frag
     [[ -f $shader ]] || { echo "Missing shader: $shader" >&2; return 1; }
   fi
-  lua="hl.config({ decoration = { screen_shader = $(lua_string "$shader") } })"
+  # Partial redraws can retain the previous shader in swapchain buffers after
+  # a mode switch (visible as flickering patches when the cursor moves).
+  # Monitor damage (1) repaints each changed frame, but still idles. Keep the
+  # original value in the compositor so cycling modes does not overwrite it,
+  # and the persisted toggle captures the user's config anew after a reload.
+  if [[ $mode != off ]]; then
+    lua="if _G.yautja_vision_damage_tracking == nil then
+  _G.yautja_vision_damage_tracking = hl.get_config(\"debug.damage_tracking\")
+end
+hl.config({ debug = { damage_tracking = 1 }, decoration = { screen_shader = $(lua_string "$shader") } })"
+  else
+    lua='hl.config({ decoration = { screen_shader = "" } })
+if _G.yautja_vision_damage_tracking ~= nil then
+  if hl.get_config("debug.damage_tracking") == 1 then
+    hl.config({ debug = { damage_tracking = _G.yautja_vision_damage_tracking } })
+  end
+  _G.yautja_vision_damage_tracking = nil
+end'
+  fi
   hypr_action eval "$lua" || return
 
   if [[ $mode == off ]]; then

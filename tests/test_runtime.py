@@ -144,10 +144,40 @@ class RuntimeTests(unittest.TestCase):
         # stub; the literal must round-trip to the real shader path.
         lua = shutil.which("lua")
         if lua:
-            result = subprocess.run([lua, "-"], input="hl = { config = function(c) print(c.decoration.screen_shader) end }\n" + persisted,
+            result = subprocess.run([lua, "-"], input="hl = { get_config = function() return 2 end, config = function(c) print(c.decoration.screen_shader) end }\n" + persisted,
                                     text=True, capture_output=True, check=True)
             self.assertEqual(result.stdout.rstrip("\n"), str(self.checkout / "shaders/thermal.frag"))
         self.assertEqual(self.cli("vision", "status").stdout.strip(), "thermal")
+
+    def test_vision_restores_redraw_setting_after_cycles_and_reload(self):
+        lua = shutil.which("lua")
+        if not lua:
+            self.skipTest("Lua interpreter is required")
+        scripts = []
+        for mode in ["thermal", "em", "tracking", "off"]:
+            self.cli("vision", mode)
+            scripts.append([c[2] for c in self.commands() if c[:2] == ["hyprctl", "eval"]][-1])
+        fixture = '''
+local damage = INITIAL
+hl = {
+  get_config = function(key) assert(key == "debug.damage_tracking"); return damage end,
+  config = function(c) if c.debug then damage = c.debug.damage_tracking end end
+}
+'''
+        for initial in [0, 1, 2]:
+            with self.subTest(initial=initial):
+                program = fixture.replace("INITIAL", str(initial))
+                # Off without prior activation must leave the setting alone.
+                program += scripts[3] + f"\nassert(damage == {initial})\n"
+                for script in scripts[:3]:
+                    program += script + f"\nassert(damage == 1); assert(_G.yautja_vision_damage_tracking == {initial})\n"
+                program += scripts[3] + f"\nassert(damage == {initial}); assert(_G.yautja_vision_damage_tracking == nil)\n"
+                # A persisted toggle loaded into a fresh config must capture
+                # that config's value, not the value from the prior session.
+                program += "damage = 2\n" + scripts[1] + "\n" + scripts[3] + "\nassert(damage == 2)\n"
+                # Respect a deliberate setting change made while vision runs.
+                program += scripts[1] + "\ndamage = 0\n" + scripts[3] + "\nassert(damage == 0)\n"
+                subprocess.run([lua, "-"], input=program, text=True, capture_output=True, check=True)
 
     def test_parallel_vision_cycles_preserve_state(self):
         self.cli("vision", "off")

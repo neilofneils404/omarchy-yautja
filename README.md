@@ -20,6 +20,9 @@ Fan-made and unaffiliated with any film or game franchise.
 
 - **Vision modes** are full-screen Hyprland shaders. The mode you leave on
   survives config reloads and logins until you switch it off.
+  While active, they redraw the whole monitor on changed frames to prevent
+  stale colors and cursor-triggered flicker after switching modes. This adds
+  GPU work during updates; turning vision off restores your redraw setting.
 - **Cloak** drops a window to about 7% opacity.
 - **Hunt** sends `SIGKILL` to the window's process. Unsaved work in it is lost.
   The honour code spares anything using under 100 MB as unarmed; pass
