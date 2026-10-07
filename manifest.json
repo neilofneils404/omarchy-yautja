@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "id": "neil.yautja",
+  "name": "Yautja",
+  "version": "1.0.0",
+  "author": "Neil",
+  "license": "MIT",
+  "description": "Trophy wall and vision-mode switch for Yautja mode",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Yautja",
+    "description": "Skulls for processes hunted this session, plus the current vision mode",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "left",
+    "defaults": {
+      "maxSkulls": 8
+    },
+    "schema": [
+      { "key": "maxSkulls", "type": "number", "label": "Skulls shown", "defaultValue": 8, "description": "Older trophies collapse into a +N count." }
+    ]
+  }
+}

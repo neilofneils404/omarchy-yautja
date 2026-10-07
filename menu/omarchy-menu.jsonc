@@ -1,0 +1,11 @@
+  // >>> neil.yautja (managed by omarchy-yautja install.sh)
+  "yautja": {"icon":"󰓾","label":"Yautja","description":"Vision modes, cloak, hunt, trophies"},
+  "yautja.vision-thermal": {"icon":"󰈈","label":"Thermal vision","action":"~/.local/bin/yautja vision thermal","checked":"[[ $(~/.local/bin/yautja vision status) == thermal ]]"},
+  "yautja.vision-em": {"icon":"󰈈","label":"EM vision","action":"~/.local/bin/yautja vision em","checked":"[[ $(~/.local/bin/yautja vision status) == em ]]"},
+  "yautja.vision-tracking": {"icon":"󰈈","label":"Tracking vision","action":"~/.local/bin/yautja vision tracking","checked":"[[ $(~/.local/bin/yautja vision status) == tracking ]]"},
+  "yautja.vision-off": {"icon":"󰈉","label":"Vision off","action":"~/.local/bin/yautja vision off","checked":"[[ $(~/.local/bin/yautja vision status) == off ]]"},
+  "yautja.cloak": {"icon":"󰊠","label":"Cloak window","action":"~/.local/bin/yautja cloak","description":"Super + Alt + C"},
+  "yautja.decloak": {"icon":"󰊠","label":"Decloak all","action":"~/.local/bin/yautja cloak all-off"},
+  "yautja.trophies": {"icon":"󰚌","label":"Trophy wall","action":"~/.local/bin/yautja trophies notify"},
+  "yautja.self-destruct": {"icon":"󰚑","label":"Self-destruct","action":"~/.local/bin/yautja self-destruct","description":"Shuts down after a 10 second countdown. Pick it again to abort."},
+  // <<< neil.yautja
