@@ -38,6 +38,8 @@ elif name == "pgrep":
     sys.exit(1)
 elif name == "sleep":
     time.sleep(float(args[0]) * float(os.environ.get("MOCK_SLEEP_FACTOR", "1")))
+elif name == "jq":
+    os.execv("/usr/bin/jq", ["jq", *args])
 '''
 
 
@@ -57,7 +59,7 @@ class RuntimeTests(unittest.TestCase):
         for path in [self.home, self.config / "yautja", self.state, self.runtime, self.mockbin]:
             path.mkdir(parents=True)
         (self.config / "yautja/config").write_text("SOUND=0\nLOCK_SECONDS=2\n")
-        for command in ["hyprctl", "omarchy-notification-send", "omarchy", "pw-play", "ps", "pgrep", "sleep"]:
+        for command in ["hyprctl", "omarchy-notification-send", "omarchy", "pw-play", "ps", "pgrep", "sleep", "jq"]:
             script = self.mockbin / command
             script.write_text(MOCK)
             script.chmod(0o755)
@@ -175,6 +177,28 @@ class RuntimeTests(unittest.TestCase):
         trophies = json.loads(self.cli("trophies", "json").stdout)
         self.assertEqual(len(trophies), 1)
         self.assertTrue(trophies[0]["worthy"])
+
+    def test_hunt_keeps_private_titles_out_of_process_arguments(self):
+        title = 'PRIVATE-DOCUMENT-731: "budget" \\ drafts\t秘密\nsecond line'
+        window = json.loads(self.window_file.read_text())
+        window["title"] = title
+        self.window_file.write_text(json.dumps(window))
+        self.cli("vision", "thermal")
+        for rss in ("2097152", "2048"):
+            self.cli("hunt", "--no-honour", extra={"MOCK_RSS": rss})
+            self.cli("hunt", "--no-honour", extra={"MOCK_RSS": rss})
+
+        for command in self.commands():
+            self.assertNotIn("PRIVATE-DOCUMENT-731", " ".join(command), command)
+        state = json.loads(self.state_file.read_text())
+        self.assertEqual(state["vision"], "thermal")
+        trophies = state["trophies"]
+        self.assertEqual([entry["title"] for entry in trophies], [title, title])
+        self.assertEqual([entry["worthy"] for entry in trophies], [True, False])
+        history = self.state / "yautja/kills.jsonl"
+        self.assertEqual([json.loads(line) for line in history.read_text().splitlines()], trophies)
+        for path in (self.state_file, history):
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
     def test_old_expiry_cannot_remove_new_lock_on_same_window(self):
         self.cli("hunt")

@@ -228,17 +228,20 @@ release_lock() {
 }
 
 record_kill() {
-  local class=$1 title=$2 pid=$3 rss=$4 worthy=$5 entry
-  entry=$(jq -cn --arg class "$class" --arg title "$title" --arg boot "$(boot_id)" \
+  local window=$1 pid=$2 rss=$3 worthy=$4 entry
+  # Window titles can contain private data. Feed both the window and the
+  # resulting entry through stdin, never through process-visible arguments.
+  entry=$(jq -c --arg boot "$(boot_id)" \
     --argjson pid "$pid" --argjson rss "$rss" --argjson worthy "$worthy" --argjson at "$(date +%s)" \
-    '{class: $class, title: $title, pid: $pid, rss_kb: $rss, worthy: $worthy, boot: $boot, at: $at}') || return
+    '{class: (.class // "Unknown"), title: (.title // ""), pid: $pid, rss_kb: $rss,
+      worthy: $worthy, boot: $boot, at: $at}' <<<"$window") || return
   printf '%s\n' "$entry" >>"$KILL_LOG"
-  read_state | jq --argjson entry "$entry" --arg boot "$(boot_id)" \
-    '.trophies = ([.trophies[]? | select(.boot == $boot)] + [$entry])' | write_state
+  { read_state; printf '%s\n' "$entry"; } | jq -s --arg boot "$(boot_id)" \
+    '.[1] as $entry | .[0] | .trophies = ([.trophies[]? | select(.boot == $boot)] + [$entry])' | write_state
 }
 
 hunt() {
-  local honour=1 window address pid class title rss mass started now token
+  local honour=1 window address pid class rss mass started now token
   local locked_address="" locked_pid="" locked_start="" locked_at=0 locked_token=""
   [[ ${1:-} != --no-honour ]] || honour=0
   window=$(hyprctl activewindow -j) || return
@@ -246,7 +249,6 @@ hunt() {
   if [[ -z $address ]]; then notify "󰓾" "No prey in sight"; return 0; fi
   pid=$(jq -r '.pid' <<<"$window") || return
   class=$(jq -r '.class // "Unknown"' <<<"$window") || return
-  title=$(jq -r '.title // ""' <<<"$window") || return
   if [[ ! $pid =~ ^[0-9]+$ ]] || (( pid <= 1 )) || [[ $class == org.quickshell ]]; then
     notify "󰓾" "Not prey" "$class cannot be hunted"
     return 0
@@ -291,10 +293,10 @@ hunt() {
     return 1
   fi
   if (( rss >= WORTHY_KB )); then
-    record_kill "$class" "$title" "$pid" "$rss" true || return
+    record_kill "$window" "$pid" "$rss" true || return
     notify "󰚌" "Trophy taken: $class" "$mass"
   else
-    record_kill "$class" "$title" "$pid" "$rss" false || return
+    record_kill "$window" "$pid" "$rss" false || return
     notify "󰓾" "Kill: $class" "$mass. Too small for the wall."
   fi
 }
